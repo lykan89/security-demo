@@ -14,7 +14,7 @@
   "author": "Security Demo",
   "license": "MIT",
   "dependencies": {
-    "express": "4.17.1",
+    "express": "4.22.0",
     "lodash": "4.17.15",
     "moment": "2.24.0",
     "request": "2.88.0",
