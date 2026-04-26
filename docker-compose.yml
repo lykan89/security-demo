@@ -1,0 +1,118 @@
+version: '3.8'
+
+services:
+  # Vulnerable Node.js Application
+  vulnerable-app:
+    build: .
+    container_name: vulnerable-app
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - DB_PASSWORD=SuperSecretPassword123!@#
+      - API_KEY=sk-prod-1a2b3c4d5e6f7g8h9i0j
+    volumes:
+      - .:/app
+      - /app/node_modules
+    restart: unless-stopped
+    networks:
+      - security-demo
+
+  # SonarQube Community Edition
+  sonarqube:
+    image: sonarqube:community
+    container_name: sonarqube
+    ports:
+      - "9000:9000"
+    environment:
+      - SONAR_JDBC_URL=jdbc:postgresql://postgres:5432/sonarqube
+      - SONAR_JDBC_USERNAME=sonar
+      - SONAR_JDBC_PASSWORD=sonar
+    depends_on:
+      - postgres
+    volumes:
+      - sonarqube_data:/opt/sonarqube/data
+      - sonarqube_logs:/opt/sonarqube/logs
+      - sonarqube_extensions:/opt/sonarqube/extensions
+    restart: unless-stopped
+    networks:
+      - security-demo
+
+  # PostgreSQL for SonarQube
+  postgres:
+    image: postgres:15
+    container_name: postgres-sonar
+    environment:
+      - POSTGRES_DB=sonarqube
+      - POSTGRES_USER=sonar
+      - POSTGRES_PASSWORD=sonar
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      - security-demo
+
+  # OWASP ZAP for DAST
+  zaproxy:
+    image: owasp/zap2docker-stable
+    container_name: zaproxy
+    ports:
+      - "8080:8080"
+    environment:
+      - ZAP_PORT=8080
+    volumes:
+      - ./zap-reports:/zap/wrk
+    command: zap-webswing.sh
+    depends_on:
+      - vulnerable-app
+    restart: unless-stopped
+    networks:
+      - security-demo
+
+volumes:
+  sonarqube_data:
+  sonarqube_logs:
+  sonarqube_extensions:
+  postgres_data:
+
+networks:
+  security-demo:
+    driver: bridge
+
+# ============================================================================
+# USAGE:
+# ============================================================================
+# 
+# Start all services:
+#   docker-compose up -d
+#
+# View logs:
+#   docker-compose logs -f vulnerable-app
+#   docker-compose logs -f sonarqube
+#
+# Access services:
+#   Application: http://localhost:3000
+#   SonarQube: http://localhost:9000 (admin/admin)
+#   ZAP: http://localhost:8080
+#
+# Run SonarQube scan:
+#   sonar-scanner \
+#     -Dsonar.projectKey=vulnerable-demo \
+#     -Dsonar.sources=. \
+#     -Dsonar.host.url=http://localhost:9000 \
+#     -Dsonar.login=admin \
+#     -Dsonar.password=admin
+#
+# Run Trivy scan:
+#   trivy image vulnerable-app:latest
+#   trivy config .
+#
+# Run npm audit:
+#   npm audit
+#
+# Stop all services:
+#   docker-compose down
+#
+# Remove volumes:
+#   docker-compose down -v
+#

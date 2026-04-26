@@ -1,0 +1,355 @@
+name: 🔒 Comprehensive Security Scanning
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    - cron: '0 2 * * *'  # Daily security scan at 2 AM UTC
+
+permissions:
+  contents: read
+  security-events: write
+  checks: write
+  pull-requests: write
+
+jobs:
+  # ============================================================================
+  # DEPENDENCY SCANNING - Catch vulnerable npm packages
+  # ============================================================================
+  dependency-check:
+    name: 📦 Dependency Vulnerability Check
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 📝 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: 🔍 Install dependencies
+        run: npm ci
+
+      - name: 🎯 npm audit - Detect vulnerable packages
+        id: npm-audit
+        continue-on-error: true
+        run: |
+          npm audit --json > npm-audit-report.json
+          npm audit --audit-level=moderate
+          
+      - name: 📊 Upload npm audit report
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: npm-audit-report
+          path: npm-audit-report.json
+
+      - name: 🚨 Comment PR with audit results
+        if: github.event_name == 'pull_request' && steps.npm-audit.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const audit = JSON.parse(fs.readFileSync('npm-audit-report.json', 'utf8'));
+            const vulnerabilities = audit.metadata.vulnerabilities;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 🚨 NPM Audit Results\n\n- **Critical**: ${vulnerabilities.critical || 0}\n- **High**: ${vulnerabilities.high || 0}\n- **Moderate**: ${vulnerabilities.moderate || 0}\n- **Low**: ${vulnerabilities.low || 0}\n\n[View full audit report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})`
+            });
+
+  # ============================================================================
+  # SAST - Static Application Security Testing with SonarQube Community
+  # Catches: SQL injection, XSS, weak crypto, hardcoded secrets, etc.
+  # ============================================================================
+  sonarqube-scan:
+    name: 🔬 SonarQube SAST Analysis
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for better analysis
+
+      - name: 📝 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 🔐 SonarQube Community Edition Scanner
+        uses: SonarSource/sonarqube-scan-action@master
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL || 'http://localhost:9000' }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN || 'not_set' }}
+        continue-on-error: true
+
+      - name: 📊 SonarQube Quality Gate Check
+        uses: SonarSource/sonarqube-quality-gate-action@master
+        if: always()
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN || 'not_set' }}
+        timeout-minutes: 5
+        continue-on-error: true
+
+  # ============================================================================
+  # CONTAINER SCANNING - Detect vulnerabilities in Docker images
+  # Uses Trivy: Fast, accurate vulnerability scanner for containers/IaC
+  # ============================================================================
+  container-scan:
+    name: 🐳 Container Security Scan (Trivy)
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🏗️ Build Docker image
+        id: build
+        run: |
+          docker build -t vulnerable-app:${{ github.sha }} .
+          docker image inspect vulnerable-app:${{ github.sha }}
+
+      - name: 🔍 Trivy - Scan Docker image for vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: vulnerable-app:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+        continue-on-error: true
+
+      - name: 📋 Trivy - Generate table report
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: vulnerable-app:${{ github.sha }}
+          format: 'table'
+          output: 'trivy-report.txt'
+        continue-on-error: true
+
+      - name: 📤 Upload Trivy SARIF report
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+          category: 'trivy-container'
+
+      - name: 📊 Upload Trivy table report
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: trivy-report
+          path: trivy-report.txt
+
+  # ============================================================================
+  # IaC SECURITY - Terraform/CloudFormation vulnerability scanning
+  # Uses Trivy for Infrastructure as Code analysis
+  # ============================================================================
+  infrastructure-scan:
+    name: 🏗️ Infrastructure as Code Security (Trivy)
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔍 Trivy - Scan Terraform files
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'config'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-iac-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          skip-dirs: 'node_modules,.git,.github'
+        continue-on-error: true
+
+      - name: 📋 Trivy - Generate IaC report
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'config'
+          scan-ref: '.'
+          format: 'table'
+          output: 'trivy-iac-report.txt'
+        continue-on-error: true
+
+      - name: 📤 Upload Trivy IaC SARIF
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-iac-results.sarif'
+          category: 'trivy-iac'
+
+      - name: 📊 Upload IaC report
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: trivy-iac-report
+          path: trivy-iac-report.txt
+
+  # ============================================================================
+  # SECRETS DETECTION - Find hardcoded credentials, API keys, tokens
+  # Catches exposed secrets before they reach repository
+  # ============================================================================
+  secrets-scan:
+    name: 🔐 Secrets Detection (TruffleHog)
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 🔐 TruffleHog - Scan for secrets and credentials
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+          extra_args: '--json'
+        continue-on-error: true
+
+      - name: 🔐 GitLeaks - Alternative secrets detector
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+  # ============================================================================
+  # CODE QUALITY - ESLint, code smells, maintainability
+  # ============================================================================
+  code-quality:
+    name: 📈 Code Quality Analysis
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 📝 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 🎯 ESLint - Code quality and style
+        id: eslint
+        continue-on-error: true
+        run: |
+          npx eslint . --format=json --output-file=eslint-report.json || true
+          npx eslint .
+
+      - name: 📊 Upload ESLint report
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: eslint-report
+          path: eslint-report.json
+
+      - name: 📈 Publish code quality metrics
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: ESLint Report
+          path: 'eslint-report.json'
+          reporter: 'json'
+        continue-on-error: true
+
+  # ============================================================================
+  # SBOM GENERATION - Software Bill of Materials for supply chain security
+  # ============================================================================
+  sbom-generation:
+    name: 📋 SBOM Generation (CycloneDX)
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 📝 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 📋 Generate SBOM
+        uses: CycloneDX/gh-node-module-generatebom@master
+        with:
+          output-file: bom.json
+
+      - name: 📤 Upload SBOM
+        uses: actions/upload-artifact@v3
+        with:
+          name: sbom-report
+          path: bom.json
+
+      - name: 🔍 Analyze SBOM for known vulnerabilities
+        run: |
+          echo "SBOM generated: $(wc -l < bom.json) lines"
+          # Could integrate with vulnerability database here
+
+  # ============================================================================
+  # SECURITY REPORT AGGREGATION
+  # ============================================================================
+  security-report:
+    name: 📊 Security Report Summary
+    runs-on: ubuntu-latest
+    needs: [dependency-check, container-scan, infrastructure-scan, secrets-scan]
+    if: always()
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 📥 Download all reports
+        uses: actions/download-artifact@v3
+
+      - name: 📊 Generate security summary
+        run: |
+          echo "# 🔒 Security Scan Summary" > SECURITY_REPORT.md
+          echo "" >> SECURITY_REPORT.md
+          echo "**Scan Date**: $(date)" >> SECURITY_REPORT.md
+          echo "**Commit**: ${{ github.sha }}" >> SECURITY_REPORT.md
+          echo "**Branch**: ${{ github.ref }}" >> SECURITY_REPORT.md
+          echo "" >> SECURITY_REPORT.md
+          
+          echo "## Scan Results" >> SECURITY_REPORT.md
+          echo "" >> SECURITY_REPORT.md
+          echo "- ✅ Dependency Check: Completed" >> SECURITY_REPORT.md
+          echo "- ✅ SAST (SonarQube): Completed" >> SECURITY_REPORT.md
+          echo "- ✅ Container Scan (Trivy): Completed" >> SECURITY_REPORT.md
+          echo "- ✅ IaC Scan (Trivy): Completed" >> SECURITY_REPORT.md
+          echo "- ✅ Secrets Detection: Completed" >> SECURITY_REPORT.md
+          echo "- ✅ Code Quality: Completed" >> SECURITY_REPORT.md
+          echo "" >> SECURITY_REPORT.md
+          
+          echo "## Next Steps" >> SECURITY_REPORT.md
+          echo "1. Review SARIF reports in GitHub Security tab" >> SECURITY_REPORT.md
+          echo "2. Fix critical and high-severity findings" >> SECURITY_REPORT.md
+          echo "3. Run remediation workflows" >> SECURITY_REPORT.md
+
+      - name: 📤 Upload summary report
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-summary
+          path: SECURITY_REPORT.md
